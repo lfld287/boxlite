@@ -139,3 +139,26 @@ counter, open and unlinked files on the disk and a volume, and a DAX mapping; it
 destroys the box and its home, imports into an empty runtime and requires the same PID, marker and
 execution to continue. It needs `/dev/kvm`, `make runtime:debug` and registry access for
 `alpine:latest`.
+
+## Run KVM acceptance in a fork
+
+The `ci/checkpoint-kvm` branch carries the **Checkpoint KVM acceptance** workflow.
+Pushing this branch runs it on an Ubuntu 22.04 x86_64 GitHub-hosted runner. It checks
+KVM access, builds the real runtime and explicitly runs
+`make test:checkpoint:acceptance SETUP_DONE=1` after building the test executable.
+No dependency stubs are used. Missing KVM, build failures and failed continuation
+assertions fail the job; an ordinary unit-test pass is not checkpoint acceptance.
+
+Open the run in **Actions → Checkpoint KVM acceptance** and download
+`checkpoint-kvm-logs-<attempt>` for setup, build and acceptance output. To repeat
+that exact commit, use **Re-run all jobs** or:
+
+```bash
+gh run rerun RUN_ID --repo lfld287/boxlite
+```
+
+This branch does not change the snapshot PR head or the fork's default branch.
+It uses a branch push because GitHub requires a workflow on the default branch
+for [manual dispatch](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow).
+GitHub [does not officially support nested virtualization](https://docs.github.com/en/actions/concepts/runners/github-hosted-runners#runner-images);
+KVM availability and successful guest continuation must be established by the run.

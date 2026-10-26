@@ -1,0 +1,72 @@
+name: Checkpoint KVM acceptance
+
+on:
+  push:
+    branches: [ci/checkpoint-kvm]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checkpoint-kvm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checkpoint:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Require KVM and record host
+        run: |
+          mkdir -p acceptance-logs
+          {
+            git rev-parse HEAD
+            uname -a
+            lscpu
+            df -h .
+            test -c /dev/kvm
+            sudo chmod a+rw /dev/kvm
+            make _ensure-kvm
+          } 2>&1 | tee acceptance-logs/host.log
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache: 'false'
+      - uses: ./.github/actions/sccache
+
+      - name: Install build dependencies and pinned submodules
+        run: |
+          make setup:build 2>&1 | tee acceptance-logs/setup.log
+          git submodule status | tee acceptance-logs/submodules.log
+          test "$(git -C src/deps/libkrun-sys/vendor/libkrun rev-parse HEAD)" = f68445978447fd0fada64f74b1892835b931a767
+
+      - name: Build real runtime and acceptance executable
+        run: |
+          test -z "${BOXLITE_DEPS_STUB:-}"
+          make runtime:debug 2>&1 | tee acceptance-logs/runtime-build.log
+          make test:checkpoint:acceptance:build 2>&1 | tee acceptance-logs/test-build.log
+
+      - name: Verify checkpoint continues the guest process
+        timeout-minutes: 15
+        run: |
+          make test:checkpoint:acceptance SETUP_DONE=1 2>&1 | tee acceptance-logs/acceptance.log
+
+      - name: Save acceptance logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkpoint-kvm-logs-${{ github.run_attempt }}
+          path: acceptance-logs/
+          retention-days: 7
