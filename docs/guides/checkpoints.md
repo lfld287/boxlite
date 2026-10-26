@@ -62,6 +62,21 @@ Directories the box owns itself are coordinated by the runtime.
   bundled kernel and shim). No image, image cache or source box is read. Volumes are restored as
   copies inside the new box's home; the original host paths are not used.
 - **Same identity:** import must run as the same user (effective UID/GID) as the export.
+- **A restricted CPU.** A checkpoint-enabled guest does not see CPU features whose state a
+  checkpoint does not save, so it never enables them:
+
+  | Hidden | CPUID |
+  |---|---|
+  | Supervisor and dynamic XSAVE state: XSAVES, XFD, every XSAVE component except x87, SSE, AVX, AVX-512 and PKRU | leaf 0xD |
+  | SGX, MPX, RDT, processor trace, CET, PKS, architectural LBR, user interrupts, AMX | leaf 7 |
+  | Nested VMX/SVM, AMD IBS | leaves 1, 0x80000001 |
+  | PMU, RDT, processor trace, SVM, IBS, SEV, PQoS and PerfMonV2 leaves | 0xA, 0xF, 0x10, 0x14, 0x8000000A, 0x8000001B, 0x8000001F, 0x80000020, 0x80000022 |
+
+  The guest also gets no leaf 0x1F; it reads its topology from leaf 1 and 0xB, or AMD's extended
+  leaves, which carry each vCPU's own APIC ID. Boxes without `--enable-checkpoint` see the full CPU.
+- **A matching host.** Import refuses a host whose KVM-supported CPUID, MSR list, XSAVE size or KVM
+  capabilities differ from the exporting host's. Only the APIC IDs of the CPU that queried KVM may
+  differ, so a checkpoint imports on the host that wrote it.
 - **Size:** the file holds the box's RAM, both disks at their full virtual size and every share's
   files. A checkpoint-enabled box may write files up to twice its disk size plus its RAM plus 4 GiB;
   an export that would not fit fails before writing, and the box stays paused.
@@ -129,7 +144,7 @@ new connections work.
 | Area | Status |
 |---|---|
 | CLI parsing, refusals and non-KVM runtime paths | unit tests |
-| x86_64 guest agent (static musl build) and its unit tests | built with `make guest`; unit tests pass in an emulated amd64 container except two that need `openat2`, which the emulator lacks |
+| x86_64 guest agent (static musl build) and its unit tests | built with `make guest`. The execution tests (`service::exec::`) pass 69/69 one at a time in an emulated amd64 container. The latest full suite there is incomplete, not a pass: before it was stopped it printed 356 passed, 3 failed (two `service::files` tests that need `openat2`, which the emulator lacks, and one fd test that fails only when tests run in parallel) |
 | Real guest continuation (`make test:checkpoint:acceptance`) | passes on KVM: [run 40329148427](https://github.com/lfld287/boxlite/actions/runs/40329148427), commit `47b0fb39`, libkrun `96c0ca3c`, GitHub-hosted `ubuntu-22.04` (AMD EPYC 9V45, kernel 6.8 azure) |
 | x86_64 VMM seccomp filter with the checkpoint syscalls | **UNVERIFIED** at runtime: the filter is compiled and its decisions checked; a box with networking skips it (gvproxy runs in the shim), so the acceptance run did not install it |
 | virtio-fs DAX mappings in a real Linux guest, and FUSE DAX in the bundled guest kernel | verified by the same run: the share mounts with `dax=always`, the guest reports its mapped file as DAX, and the checkpoint holds the file mapping |
@@ -142,10 +157,17 @@ execution to continue. It needs `/dev/kvm`, `make runtime:debug` and registry ac
 
 ## Run KVM acceptance in a fork
 
-The `ci/checkpoint-kvm` branch carries the **Checkpoint KVM acceptance** workflow and pins
-libkrun to the `lfld287/snapshot-kvm-acceptance` branch of the
-[lfld287/libkrun](https://github.com/lfld287/libkrun) fork, which holds the KVM fixes the run needed
-on top of the snapshot implementation.
+The `ci/checkpoint-kvm` branch carries the **Checkpoint KVM acceptance** workflow. Its libkrun
+gitlink is the fixed commit `96c0ca3ce15e71eda59c64555dbfad4297d664e9`, fetched from the
+[lfld287/libkrun](https://github.com/lfld287/libkrun) fork, and the workflow fails unless the checkout
+is exactly that commit. It adds four KVM fixes on top of the snapshot implementation `f6844597`:
+
+| Commit | Fix |
+|---|---|
+| `258cdbb2` | The MP table describes all 24 IOAPIC inputs, so disks (GSI 16–22) and the NIC (GSI 23) get IRQs |
+| `4fb5baeb` | A checkpoint boot hides the CPU features listed under [What a checkpoint holds and needs](#what-a-checkpoint-holds-and-needs) |
+| `80cea934` | Export accepts the hypervisor, TSC-deadline and HTT bits the VMM sets itself |
+| `96c0ca3c` | Import compares the hosts' supported CPUID without the calling CPU's APIC IDs |
 Pushing this branch runs it on an Ubuntu 22.04 x86_64 GitHub-hosted runner. It checks
 KVM access, builds the real runtime and explicitly runs
 `make test:checkpoint:acceptance SETUP_DONE=1` after building the test executable.

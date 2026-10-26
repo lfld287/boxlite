@@ -687,13 +687,15 @@ mod tests {
         let manager = OutputManager::new(None, None);
 
         let first = manager.attach().await.unwrap();
-        let release = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            drop(first);
-        });
+        let second = manager.attach();
+        tokio::pin!(second);
+        assert!(
+            futures::poll!(&mut second).is_pending(),
+            "the Attach must wait while the output is held"
+        );
 
-        assert!(manager.attach().await.is_ok());
-        release.await.unwrap();
+        drop(first);
+        assert!(second.await.is_ok());
     }
 
     #[tokio::test]
