@@ -573,6 +573,8 @@ GitHub 托管 `ubuntu-22.04` runner（AMD EPYC 9V45，`/dev/kvm` 可用）运行
 | [40314949121](https://github.com/lfld287/boxlite/actions/runs/40314949121)、[40318770960](https://github.com/lfld287/boxlite/actions/runs/40318770960) | `9fa6694d`（libkrun `80cea934`）、`3aa2e187` | 导出成功；源 resume 后重新 attach 被 guest 拒绝：`execution output is already attached` |
 | [40320726162](https://github.com/lfld287/boxlite/actions/runs/40320726162) | `720fc1d8` | 源侧断言全部通过；导入失败 `libkrun status=-5`，失败的导入删除盒目录，原因随 `shim.stderr` 丢失 |
 | [40324761265](https://github.com/lfld287/boxlite/actions/runs/40324761265) | `a0b246c3`（导入失败时记录 shim stderr 尾部） | `incompatible CPU vendor/features, MSRs, XSAVE layout or KVM capabilities` |
+| [40326732524](https://github.com/lfld287/boxlite/actions/runs/40326732524) | `d2a87df2`（libkrun `96c0ca3c`） | `console output …/logs/console.log: File exists (os error 17)` |
+| [40329148427](https://github.com/lfld287/boxlite/actions/runs/40329148427) | `47b0fb39` | **通过**：`test result: ok. 1 passed; 0 failed; 0 ignored`，242.86 s；`cut <= 5, source reached 11, restored reached 15` |
 
 根因（libkrun f6844597）：检查点启动把磁盘放在 GSI 16–22、网卡放在 GSI 23（`ram_snapshot/blk/mod.rs`、`ram_snapshot/nic.rs`），但 `arch/src/x86_64/mptable.rs` 只为 IOAPIC 输入 0–15 写中断源。Linux 不为未描述的输入分配 IRQ，驱动 `request_irq` 返回 EINVAL。GSI 5–10 上的 virtio-fs、console、vsock 正常；普通 VMM 设备只用 GSI 5–15，所以只在检查点模式出现。原有 KVM 测试从 virtio-fs 根启动且不使用磁盘，未覆盖。
 
@@ -585,3 +587,5 @@ GitHub 托管 `ubuntu-22.04` runner（AMD EPYC 9V45，`/dev/kvm` 可用）运行
 第四个根因（guest）：resume 重置所有 vsock 连接，但 guest 的输出转发任务只在下一次发送失败时释放 attach 租约，且 guest 会先处理新连接的 Attach（约 1 ms）再拆除旧连接（run 40318770960 的 guest 日志）。修复 `3aa2e187`：消费者关闭即结束转发；`720fc1d8`：live Attach 最多等待 1 s 让正在释放的消费者让出，持续 attach 的消费者仍被拒绝。
 
 第五个根因（libkrun `80cea934`）：`validate_target` 精确比较导出与导入主机的 `KVM_GET_SUPPORTED_CPUID`，但 KVM 在调用所在的 CPU 上执行 CPUID 并透传其 APIC ID（Linux v6.8 `cpuid.c`：leaf 1 EBX[31:24]，leaf 0xB/0x1F EDX），同一主机上两次捕获也会不同。修复 `96c0ca3c`：比较时只清除这些字段，其余特性、XSAVE 布局、MSR 与 KVM 能力仍精确比较。
+
+第六个根因（BoxLite jailer）：libkrun 导入以独占方式创建 console 输出并拒绝已有文件，而 jailer 在每次 shim 启动前预建 `logs/console.log`。预建并无必要（`logs/` 整目录可写绑定，libkrun 每次启动都会创建该文件）。修复 `47b0fb39`：只预建 `logs/` 与 exit 文件。之后完整验收通过（上表最后一行）。

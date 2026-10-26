@@ -4,7 +4,7 @@
 
 On Linux x86_64 with KVM, a box created with `--enable-checkpoint` can be paused, written to one
 checkpoint file and imported as a new box whose guest processes continue after `resume`. CLI and
-Rust only. Running on real KVM is **UNVERIFIED**.
+Rust only. Real-KVM acceptance passes on a GitHub-hosted runner; see [Verification status](#verification-status).
 
 ```bash
 boxlite create --enable-checkpoint --name web -v /srv/data:/data alpine:latest \
@@ -130,9 +130,9 @@ new connections work.
 |---|---|
 | CLI parsing, refusals and non-KVM runtime paths | unit tests |
 | x86_64 guest agent (static musl build) and its unit tests | built with `make guest`; unit tests pass in an emulated amd64 container except two that need `openat2`, which the emulator lacks |
-| Real guest continuation (`make test:checkpoint:acceptance`) | written and compiled for Linux x86_64; **UNVERIFIED**: not run on KVM |
-| x86_64 VMM seccomp filter with the checkpoint syscalls | **UNVERIFIED** at runtime: the filter is compiled and its decisions checked, but not installed on an x86_64 host |
-| virtio-fs DAX mappings in a real Linux guest, and FUSE DAX in the bundled guest kernel | **UNVERIFIED** |
+| Real guest continuation (`make test:checkpoint:acceptance`) | passes on KVM: [run 40329148427](https://github.com/lfld287/boxlite/actions/runs/40329148427), commit `47b0fb39`, libkrun `96c0ca3c`, GitHub-hosted `ubuntu-22.04` (AMD EPYC 9V45, kernel 6.8 azure) |
+| x86_64 VMM seccomp filter with the checkpoint syscalls | **UNVERIFIED** at runtime: the filter is compiled and its decisions checked; a box with networking skips it (gvproxy runs in the shim), so the acceptance run did not install it |
+| virtio-fs DAX mappings in a real Linux guest, and FUSE DAX in the bundled guest kernel | verified by the same run: the share mounts with `dax=always`, the guest reports its mapped file as DAX, and the checkpoint holds the file mapping |
 
 The acceptance test runs one box with a long-lived process holding a heap-only random marker, a
 counter, open and unlinked files on the disk and a volume, and a DAX mapping; it pauses, exports,
@@ -142,12 +142,26 @@ execution to continue. It needs `/dev/kvm`, `make runtime:debug` and registry ac
 
 ## Run KVM acceptance in a fork
 
-The `ci/checkpoint-kvm` branch carries the **Checkpoint KVM acceptance** workflow.
+The `ci/checkpoint-kvm` branch carries the **Checkpoint KVM acceptance** workflow and pins
+libkrun to the `lfld287/snapshot-kvm-acceptance` branch of the
+[lfld287/libkrun](https://github.com/lfld287/libkrun) fork, which holds the KVM fixes the run needed
+on top of the snapshot implementation.
 Pushing this branch runs it on an Ubuntu 22.04 x86_64 GitHub-hosted runner. It checks
 KVM access, builds the real runtime and explicitly runs
 `make test:checkpoint:acceptance SETUP_DONE=1` after building the test executable.
 No dependency stubs are used. Missing KVM, build failures and failed continuation
 assertions fail the job; an ordinary unit-test pass is not checkpoint acceptance.
+
+The acceptance step sets two variables, usable locally too:
+
+| Variable | Value in CI | Effect |
+|---|---|---|
+| `RUST_LOG` | `boxlite=debug,krun=debug` | Debug logs from BoxLite and libkrun (libkrun reads `RUST_LOG` itself). Plain `debug` would also log registry tokens |
+| `BOXLITE_CHECKPOINT_LOGS` | `$GITHUB_WORKSPACE/acceptance-logs/boxes` | Absolute directory where the test copies each box's `logs/`, `exit`, `exit.previous` and `shim.stderr` before its home is deleted; disks, memory and keys are never copied |
+
+The uploaded `checkpoint-kvm-logs-<attempt>` artifact holds the host, setup, build, acceptance
+and `dmesg` logs and those box logs. A failed import removes its box directory, so the operator
+log (the acceptance output) carries the tail of that shim's stderr instead.
 
 To launch it explicitly through the existing **Test** workflow entry point:
 
