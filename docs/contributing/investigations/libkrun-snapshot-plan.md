@@ -23,7 +23,7 @@
 | libkrun | [`e12b9b3780ffa8df9f3e1797b217d13453479167`][libkrun] | BoxLite gitlink 指定的 VMM 和设备实现 |
 | libkrunfw | `e0647fa7a3932c4570fb2c0fd483b9f7a382ebdd` | 同一 BoxLite 提交的固件 gitlink |
 
-libkrun gitlink 在 `ci/checkpoint-kvm` 分支固定为 `258cdbb2ca6f7d083f055a3c296ae6adbc19e0b3`：快照实现 `f68445978447fd0fada64f74b1892835b931a767` 之上的 MP 表修复（见文末“KVM 验收”），位于 lfld287/libkrun 的 `lfld287/snapshot-ioapic-gsi` 分支；因此 `.gitmodules`、子模块初始化脚本的精确 URL 白名单和测试 fixture 在该分支使用 lfld287 来源。f6844597 仍经 boxlite-ai/libkrun `x_features` 的 Draft PR 提供。上表及下文固定提交链接保留原始基线，不随 gitlink 改写；迁移的验证见文末“迁移到 x_features”。
+libkrun gitlink 在 `ci/checkpoint-kvm` 分支固定为 `4fb5baeb7ffe0eb810c63bc1d14c0575c773cfcd`：快照实现 `f68445978447fd0fada64f74b1892835b931a767` 之上的 MP 表与 CPUID 两个修复（见文末“KVM 验收”），位于 lfld287/libkrun 的 `lfld287/snapshot-kvm-acceptance` 分支；因此 `.gitmodules`、子模块初始化脚本的精确 URL 白名单和测试 fixture 在该分支使用 lfld287 来源。f6844597 仍经 boxlite-ai/libkrun `x_features` 的 Draft PR 提供。上表及下文固定提交链接保留原始基线，不随 gitlink 改写；迁移的验证见文末“迁移到 x_features”。
 
 - 复用已有 KVM 状态读写：[VM 状态][vm-state]包含 PIT、clock、PIC 和 IOAPIC；[vCPU 状态][vcpu-state]包含寄存器、MSR、LAPIC 等。但保存函数未接入运行时请求，不能据此认定已有完整快照能力。
 - 复用 BoxLite 的[磁盘展平与归档][export]经验。当前导出只打包容器盘及配置，[导入][import]创建 `Stopped` box；这些机制不能恢复运行中进程。
@@ -567,7 +567,11 @@ GitHub 托管 `ubuntu-22.04` runner（AMD EPYC 9V45，`/dev/kvm` 可用）运行
 |---|---|---|
 | [40299928240](https://github.com/lfld287/boxlite/actions/runs/40299928240) | `fec6ecfe` | 首次 `start()` 失败，仅得 `The VM failed to start.`；测试未初始化 tracing，box 日志随临时 home 删除 |
 | [40306634602](https://github.com/lfld287/boxlite/actions/runs/40306634602) | `a64fe4a0`（测试 tracing 与日志保存） | guest console：两块 virtio-blk 与 virtio-net `probe … failed with error -22`，无根盘，init 退出 |
+| [40309278195](https://github.com/lfld287/boxlite/actions/runs/40309278195) | `2628bcbb`（libkrun `258cdbb2`） | 启动、DAX 共享挂载、暂停断言通过；导出 EIO，盒保持暂停；libkrun 无日志（其 env_logger 直接读取 `RUST_LOG`） |
+| [40310866880](https://github.com/lfld287/boxlite/actions/runs/40310866880) | `7b553b96`（`RUST_LOG` 加 `krun=debug`） | `save vCPU 0: CPU exposes extended state outside the snapshot contract` |
 
 根因（libkrun f6844597）：检查点启动把磁盘放在 GSI 16–22、网卡放在 GSI 23（`ram_snapshot/blk/mod.rs`、`ram_snapshot/nic.rs`），但 `arch/src/x86_64/mptable.rs` 只为 IOAPIC 输入 0–15 写中断源。Linux 不为未描述的输入分配 IRQ，驱动 `request_irq` 返回 EINVAL。GSI 5–10 上的 virtio-fs、console、vsock 正常；普通 VMM 设备只用 GSI 5–15，所以只在检查点模式出现。原有 KVM 测试从 virtio-fs 根启动且不使用磁盘，未覆盖。
 
 修复 `258cdbb2`：MP 表描述 KVM 内核 IOAPIC 全部 24 个输入（与 KVM 默认路由、Firecracker 的 mptable 一致）。回归测试 `snapshot_boot_mp_table_describes_every_announced_gsi` 解析 `BootImage::new` 写出的 MP 表：仅加测试时失败（`GSI 16 of the device at 0xd0000000 has no MP table interrupt source: [0, …, 15]`），加修复后通过；amd64 容器内 `ram_snapshot::boot::tests`（非 KVM）8/8、`mptable` 6/6 通过。
+
+第二个根因（libkrun `258cdbb2`）：导出校验 `validate_cpuid` 拒绝快照不保存其状态的 CPU 特性（XSAVES、XFD、CET、AMX、PT 等）；对应的屏蔽 `minimal_cpuid` 只用于无设备的最小 VM，生产 Linux 启动（`ram_snapshot/boot.rs`）走普通 `configure_x86_64`，guest 看到 runner 的 `xsaves`，于是每次导出失败。修复 `4fb5baeb`：检查点启动在设置 CPUID 与启动寄存器前施加同一屏蔽；拓扑与严格校验不变。未改代码的验收运行 40310866880 即修复前的失败证据。

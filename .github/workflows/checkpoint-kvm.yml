@@ -51,7 +51,7 @@ jobs:
         run: |
           make setup:build 2>&1 | tee acceptance-logs/setup.log
           git submodule status | tee acceptance-logs/submodules.log
-          test "$(git -C src/deps/libkrun-sys/vendor/libkrun rev-parse HEAD)" = 258cdbb2ca6f7d083f055a3c296ae6adbc19e0b3
+          test "$(git -C src/deps/libkrun-sys/vendor/libkrun rev-parse HEAD)" = 4fb5baeb7ffe0eb810c63bc1d14c0575c773cfcd
 
       - name: Build real runtime and acceptance executable
         run: |
