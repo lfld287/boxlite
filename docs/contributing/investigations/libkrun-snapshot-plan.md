@@ -23,7 +23,7 @@
 | libkrun | [`e12b9b3780ffa8df9f3e1797b217d13453479167`][libkrun] | BoxLite gitlink 指定的 VMM 和设备实现 |
 | libkrunfw | `e0647fa7a3932c4570fb2c0fd483b9f7a382ebdd` | 同一 BoxLite 提交的固件 gitlink |
 
-libkrun gitlink 固定为快照实现 `f68445978447fd0fada64f74b1892835b931a767`，经 boxlite-ai/libkrun `x_features` 的 Draft PR 提供；`.gitmodules`、子模块初始化脚本的精确 URL 白名单和测试 fixture 均使用 boxlite-ai 来源（开发期间曾临时改为个人 fork，迁移到 BoxLite `x_features` 时已恢复）。上表及下文固定提交链接保留原始基线，不随 gitlink 改写；迁移的验证见文末“迁移到 x_features”。
+libkrun gitlink 在 `ci/checkpoint-kvm` 分支固定为 `258cdbb2ca6f7d083f055a3c296ae6adbc19e0b3`：快照实现 `f68445978447fd0fada64f74b1892835b931a767` 之上的 MP 表修复（见文末“KVM 验收”），位于 lfld287/libkrun 的 `lfld287/snapshot-ioapic-gsi` 分支；因此 `.gitmodules`、子模块初始化脚本的精确 URL 白名单和测试 fixture 在该分支使用 lfld287 来源。f6844597 仍经 boxlite-ai/libkrun `x_features` 的 Draft PR 提供。上表及下文固定提交链接保留原始基线，不随 gitlink 改写；迁移的验证见文末“迁移到 x_features”。
 
 - 复用已有 KVM 状态读写：[VM 状态][vm-state]包含 PIT、clock、PIC 和 IOAPIC；[vCPU 状态][vcpu-state]包含寄存器、MSR、LAPIC 等。但保存函数未接入运行时请求，不能据此认定已有完整快照能力。
 - 复用 BoxLite 的[磁盘展平与归档][export]经验。当前导出只打包容器盘及配置，[导入][import]创建 `Stopped` box；这些机制不能恢复运行中进程。
@@ -558,3 +558,16 @@ CLI 提供 `create`/`run --enable-checkpoint`、`pause [--host-writers-stopped]`
 - 一次性 amd64 `rust:1-bookworm` 镜像（加 protoc、libseccomp-dev、cargo-nextest、clippy；stub，无 KVM）：`make test:unit:rust FILTER=checkpoint` core 46/46、REST 48/48；clippy（`boxlite`、`boxlite-shim`、`libkrun-sys`、`boxlite-cli`、`boxlite-guest`，`--all-targets --all-features -D warnings`）通过；修复前 clippy 在验收测试处报 E0063。
 - 基线问题（未修改的目标文件）：`make fmt:check:node` 只在 `sdks/node/lib/native-contracts.ts` 报格式问题；pre-commit `lint:fix` 在 `apps/infra/mdeploy` 报 3 个 eslint 错误；API 兼容检查以 `origin/main` 为基线误报 `openapi/admin.openapi.yaml`，以 `origin/x_features` 为基线通过。
 - **UNVERIFIED**：同上一节；`make test:shim:linkage` 与验收测试构建本次未重跑。
+
+## KVM 验收（2026-10-26）
+
+GitHub 托管 `ubuntu-22.04` runner（AMD EPYC 9V45，`/dev/kvm` 可用）运行 `make test:checkpoint:acceptance`。
+
+| 运行 | 提交 | 结果 |
+|---|---|---|
+| [40299928240](https://github.com/lfld287/boxlite/actions/runs/40299928240) | `fec6ecfe` | 首次 `start()` 失败，仅得 `The VM failed to start.`；测试未初始化 tracing，box 日志随临时 home 删除 |
+| [40306634602](https://github.com/lfld287/boxlite/actions/runs/40306634602) | `a64fe4a0`（测试 tracing 与日志保存） | guest console：两块 virtio-blk 与 virtio-net `probe … failed with error -22`，无根盘，init 退出 |
+
+根因（libkrun f6844597）：检查点启动把磁盘放在 GSI 16–22、网卡放在 GSI 23（`ram_snapshot/blk/mod.rs`、`ram_snapshot/nic.rs`），但 `arch/src/x86_64/mptable.rs` 只为 IOAPIC 输入 0–15 写中断源。Linux 不为未描述的输入分配 IRQ，驱动 `request_irq` 返回 EINVAL。GSI 5–10 上的 virtio-fs、console、vsock 正常；普通 VMM 设备只用 GSI 5–15，所以只在检查点模式出现。原有 KVM 测试从 virtio-fs 根启动且不使用磁盘，未覆盖。
+
+修复 `258cdbb2`：MP 表描述 KVM 内核 IOAPIC 全部 24 个输入（与 KVM 默认路由、Firecracker 的 mptable 一致）。回归测试 `snapshot_boot_mp_table_describes_every_announced_gsi` 解析 `BootImage::new` 写出的 MP 表：仅加测试时失败（`GSI 16 of the device at 0xd0000000 has no MP table interrupt source: [0, …, 15]`），加修复后通过；amd64 容器内 `ram_snapshot::boot::tests`（非 KVM）8/8、`mptable` 6/6 通过。
