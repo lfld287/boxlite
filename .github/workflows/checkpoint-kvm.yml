@@ -59,6 +59,19 @@ jobs:
           make runtime:debug 2>&1 | tee acceptance-logs/runtime-build.log
           make test:checkpoint:acceptance:build 2>&1 | tee acceptance-logs/test-build.log
 
+      # libkrun's own checkpoint tests that boot, pause and export a real
+      # Linux guest; they need this KVM host's CPU and libkrunfw's kernel.
+      - name: Run libkrun checkpoint KVM tests
+        timeout-minutes: 20
+        env:
+          RUSTFLAGS: ''
+          RUST_LOG: krun=debug
+        run: |
+          libkrunfw="$(find "$PWD/target" -path '*/libkrunfw/lib64/libkrunfw.so.5' -print -quit)"
+          test -n "$libkrunfw"
+          KRUN_SNAPSHOT_TEST_LIBKRUNFW="$libkrunfw" make -C src/deps/libkrun-sys/vendor/libkrun snapshot-test \
+            SNAPSHOT_CARGO_FLAGS= SNAPSHOT_FILTER=ram_snapshot::boot::tests::kvm_tests 2>&1 | tee acceptance-logs/libkrun-kvm.log
+
       - name: Verify checkpoint continues the guest process
         timeout-minutes: 15
         env:
