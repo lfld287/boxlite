@@ -17,6 +17,11 @@ on:
   schedule:
     - cron: '0 3 * * 1'
   workflow_dispatch:
+    inputs:
+      checkpoint_only:
+        description: Run only real KVM checkpoint acceptance on this test branch
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -82,8 +87,15 @@ env:
   CARGO_INCREMENTAL: '0'
 
 jobs:
+  checkpoint:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.checkpoint_only }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/checkpoint-kvm.yml
+
   # Detect which files changed to conditionally run tests
   changes:
+    if: ${{ !inputs.checkpoint_only }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -759,7 +771,7 @@ jobs:
   # NOTE: keep `needs` in sync with the jobs above when adding/removing jobs.
   test-conclusion:
     name: Test (conclusion)
-    needs: [changes, infra, rust, python, node, go, setup, api, dashboard, plugins, guest_artifacts, coverage-empty]
+    needs: [checkpoint, changes, infra, rust, python, node, go, setup, api, dashboard, plugins, guest_artifacts, coverage-empty]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions: {}

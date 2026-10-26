@@ -1,6 +1,7 @@
 name: Checkpoint KVM acceptance
 
 on:
+  workflow_call:
   push:
     branches: [ci/checkpoint-kvm]
 

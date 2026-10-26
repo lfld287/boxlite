@@ -149,7 +149,15 @@ KVM access, builds the real runtime and explicitly runs
 No dependency stubs are used. Missing KVM, build failures and failed continuation
 assertions fail the job; an ordinary unit-test pass is not checkpoint acceptance.
 
-Open the run in **Actions → Checkpoint KVM acceptance** and download
+To launch it explicitly through the existing **Test** workflow entry point:
+
+```bash
+gh workflow run test.yml --repo lfld287/boxlite --ref ci/checkpoint-kvm -f checkpoint_only=true
+```
+
+The option skips ordinary test jobs and runs only checkpoint acceptance. Normal
+dispatches retain their existing test matrix. Open the resulting **Test** run
+(or the push-triggered **Checkpoint KVM acceptance** run) and download
 `checkpoint-kvm-logs-<attempt>` for setup, build and acceptance output. To repeat
 that exact commit, use **Re-run all jobs** or:
 
