@@ -23,7 +23,7 @@
 | libkrun | [`e12b9b3780ffa8df9f3e1797b217d13453479167`][libkrun] | BoxLite gitlink 指定的 VMM 和设备实现 |
 | libkrunfw | `e0647fa7a3932c4570fb2c0fd483b9f7a382ebdd` | 同一 BoxLite 提交的固件 gitlink |
 
-libkrun gitlink 在 `ci/checkpoint-kvm` 分支固定为 `80cea9340f4824b6e09757e83dafd8e969326871`：快照实现 `f68445978447fd0fada64f74b1892835b931a767` 之上的 MP 表与两个 CPUID 修复（见文末“KVM 验收”），位于 lfld287/libkrun 的 `lfld287/snapshot-kvm-acceptance` 分支；因此 `.gitmodules`、子模块初始化脚本的精确 URL 白名单和测试 fixture 在该分支使用 lfld287 来源。f6844597 仍经 boxlite-ai/libkrun `x_features` 的 Draft PR 提供。上表及下文固定提交链接保留原始基线，不随 gitlink 改写；迁移的验证见文末“迁移到 x_features”。
+libkrun gitlink 在 `ci/checkpoint-kvm` 分支固定为 `96c0ca3ce15e71eda59c64555dbfad4297d664e9`：快照实现 `f68445978447fd0fada64f74b1892835b931a767` 之上的 MP 表与三个 CPUID 修复（见文末“KVM 验收”），位于 lfld287/libkrun 的 `lfld287/snapshot-kvm-acceptance` 分支；因此 `.gitmodules`、子模块初始化脚本的精确 URL 白名单和测试 fixture 在该分支使用 lfld287 来源。f6844597 仍经 boxlite-ai/libkrun `x_features` 的 Draft PR 提供。上表及下文固定提交链接保留原始基线，不随 gitlink 改写；迁移的验证见文末“迁移到 x_features”。
 
 - 复用已有 KVM 状态读写：[VM 状态][vm-state]包含 PIT、clock、PIC 和 IOAPIC；[vCPU 状态][vcpu-state]包含寄存器、MSR、LAPIC 等。但保存函数未接入运行时请求，不能据此认定已有完整快照能力。
 - 复用 BoxLite 的[磁盘展平与归档][export]经验。当前导出只打包容器盘及配置，[导入][import]创建 `Stopped` box；这些机制不能恢复运行中进程。
@@ -570,6 +570,9 @@ GitHub 托管 `ubuntu-22.04` runner（AMD EPYC 9V45，`/dev/kvm` 可用）运行
 | [40309278195](https://github.com/lfld287/boxlite/actions/runs/40309278195) | `2628bcbb`（libkrun `258cdbb2`） | 启动、DAX 共享挂载、暂停断言通过；导出 EIO，盒保持暂停；libkrun 无日志（其 env_logger 直接读取 `RUST_LOG`） |
 | [40310866880](https://github.com/lfld287/boxlite/actions/runs/40310866880) | `7b553b96`（`RUST_LOG` 加 `krun=debug`） | `save vCPU 0: CPU exposes extended state outside the snapshot contract` |
 | [40313090107](https://github.com/lfld287/boxlite/actions/runs/40313090107) | `191d364c`（libkrun `4fb5baeb`） | `full snapshot: actual CPUID exposes unsupported target feature` |
+| [40314949121](https://github.com/lfld287/boxlite/actions/runs/40314949121)、[40318770960](https://github.com/lfld287/boxlite/actions/runs/40318770960) | `9fa6694d`（libkrun `80cea934`）、`3aa2e187` | 导出成功；源 resume 后重新 attach 被 guest 拒绝：`execution output is already attached` |
+| [40320726162](https://github.com/lfld287/boxlite/actions/runs/40320726162) | `720fc1d8` | 源侧断言全部通过；导入失败 `libkrun status=-5`，失败的导入删除盒目录，原因随 `shim.stderr` 丢失 |
+| [40324761265](https://github.com/lfld287/boxlite/actions/runs/40324761265) | `a0b246c3`（导入失败时记录 shim stderr 尾部） | `incompatible CPU vendor/features, MSRs, XSAVE layout or KVM capabilities` |
 
 根因（libkrun f6844597）：检查点启动把磁盘放在 GSI 16–22、网卡放在 GSI 23（`ram_snapshot/blk/mod.rs`、`ram_snapshot/nic.rs`），但 `arch/src/x86_64/mptable.rs` 只为 IOAPIC 输入 0–15 写中断源。Linux 不为未描述的输入分配 IRQ，驱动 `request_irq` 返回 EINVAL。GSI 5–10 上的 virtio-fs、console、vsock 正常；普通 VMM 设备只用 GSI 5–15，所以只在检查点模式出现。原有 KVM 测试从 virtio-fs 根启动且不使用磁盘，未覆盖。
 
@@ -578,3 +581,7 @@ GitHub 托管 `ubuntu-22.04` runner（AMD EPYC 9V45，`/dev/kvm` 可用）运行
 第二个根因（libkrun `258cdbb2`）：导出校验 `validate_cpuid` 拒绝快照不保存其状态的 CPU 特性（XSAVES、XFD、CET、AMX、PT 等）；对应的屏蔽 `minimal_cpuid` 只用于无设备的最小 VM，生产 Linux 启动（`ram_snapshot/boot.rs`）走普通 `configure_x86_64`，guest 看到 runner 的 `xsaves`，于是每次导出失败。修复 `4fb5baeb`：检查点启动在设置 CPUID 与启动寄存器前施加同一屏蔽；拓扑与严格校验不变。未改代码的验收运行 40310866880 即修复前的失败证据。
 
 第三个根因（libkrun `4fb5baeb`）：导出时 `validate_cpu` 要求 guest 的 leaf 1/7/0x80000001 特性位都在 `KVM_GET_SUPPORTED_CPUID` 中，但 VMM 自己设置的 leaf 1 ECX hypervisor、TSC-deadline 与 EDX HTT 从不在其中（Linux v6.8 `arch/x86/kvm/cpuid.c` 的 leaf 1 掩码），所以任何 KVM 主机上导出都失败。修复 `80cea934`：只放行这三位（QEMU `target/i386/kvm/kvm.c` 计算可暴露 CPUID 时同样补入；TSC-deadline 依赖快照已要求的内核 irqchip 与 TSC-deadline 能力），其余目标缺失的特性仍拒绝。回归测试 `compatibility_accepts_only_vmm_synthesized_leaf_1_bits_absent_from_the_target`：仅加测试时以同一错误失败，加修复后通过。
+
+第四个根因（guest）：resume 重置所有 vsock 连接，但 guest 的输出转发任务只在下一次发送失败时释放 attach 租约，且 guest 会先处理新连接的 Attach（约 1 ms）再拆除旧连接（run 40318770960 的 guest 日志）。修复 `3aa2e187`：消费者关闭即结束转发；`720fc1d8`：live Attach 最多等待 1 s 让正在释放的消费者让出，持续 attach 的消费者仍被拒绝。
+
+第五个根因（libkrun `80cea934`）：`validate_target` 精确比较导出与导入主机的 `KVM_GET_SUPPORTED_CPUID`，但 KVM 在调用所在的 CPU 上执行 CPUID 并透传其 APIC ID（Linux v6.8 `cpuid.c`：leaf 1 EBX[31:24]，leaf 0xB/0x1F EDX），同一主机上两次捕获也会不同。修复 `96c0ca3c`：比较时只清除这些字段，其余特性、XSAVE 布局、MSR 与 KVM 能力仍精确比较。
