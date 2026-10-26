@@ -61,8 +61,19 @@ jobs:
 
       - name: Verify checkpoint continues the guest process
         timeout-minutes: 15
+        env:
+          # Exactly `boxlite=debug`: libkrun logs at DEBUG only for this value
+          # or `debug`, and plain `debug` would log registry tokens.
+          RUST_LOG: boxlite=debug
+          BOXLITE_CHECKPOINT_LOGS: ${{ github.workspace }}/acceptance-logs/boxes
         run: |
           make test:checkpoint:acceptance SETUP_DONE=1 2>&1 | tee acceptance-logs/acceptance.log
+
+      - name: Save host kernel log
+        if: always()
+        run: |
+          sudo dmesg > acceptance-logs/dmesg.log
+          test -s acceptance-logs/dmesg.log
 
       - name: Save acceptance logs
         if: always()
