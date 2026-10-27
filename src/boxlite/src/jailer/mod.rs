@@ -464,14 +464,16 @@ impl<S: Sandbox> Jail for Jailer<S> {
     }
 
     fn command(&self, binary: &Path, args: &[String]) -> Command {
-        // Pre-create writable files + dirs for sandbox bind-mounting. The
-        // console log is left to libkrun inside the writable logs dir: a
-        // checkpoint import creates it exclusively and refuses an existing one.
+        // Pre-create writable files + dirs for sandbox bind-mounting
         if self.security.jailer_enabled {
             let _ = std::fs::create_dir_all(self.layout.logs_dir());
-            let exit_file = self.layout.exit_file_path();
-            if !exit_file.exists() {
-                let _ = std::fs::File::create(&exit_file);
+            for path in [
+                self.layout.exit_file_path(),
+                self.layout.console_output_path(),
+            ] {
+                if !path.exists() {
+                    let _ = std::fs::File::create(&path);
+                }
             }
         }
 

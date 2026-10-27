@@ -1,10 +1,11 @@
 name: Checkpoint KVM acceptance
 
-# Real-KVM evidence for portable checkpoints on a GitHub-hosted x86_64 runner.
-# See docs/guides/checkpoints.md#run-kvm-acceptance-in-a-fork.
+# RED RUN (test-only adapter, never merged): every production change of
+# f2f36043 reverted, its tests kept; libkrun at the pre-fix f684459 with
+# 96c0ca3c's two test files copied in. Every regression test must fail.
 on:
   push:
-    branches: [lfld287/memory-snapshot]
+    branches: [ci/memory-snapshot-red]
 
 permissions:
   contents: read
@@ -54,7 +55,7 @@ jobs:
         run: |
           make setup:build 2>&1 | tee acceptance-logs/setup.log
           git submodule status | tee acceptance-logs/submodules.log
-          test "$(git -C "$LIBKRUN" rev-parse HEAD)" = 96c0ca3ce15e71eda59c64555dbfad4297d664e9
+          test "$(git -C "$LIBKRUN" rev-parse HEAD)" = f68445978447fd0fada64f74b1892835b931a767
 
       - name: Build real runtime and acceptance executable
         id: build
@@ -78,6 +79,13 @@ jobs:
         env:
           RUSTFLAGS: ''
         run: |
+          # Red adapter: 96c0ca3c's tests over the pre-fix production code.
+          git -C "$LIBKRUN" fetch --depth 1 https://github.com/lfld287/libkrun.git 96c0ca3ce15e71eda59c64555dbfad4297d664e9
+          for file in src/vmm/src/linux/vstate/snapshot/tests.rs src/vmm/src/ram_snapshot/boot/tests.rs; do
+            git -C "$LIBKRUN" show "96c0ca3ce15e71eda59c64555dbfad4297d664e9:$file" > "$LIBKRUN/$file"
+          done
+          git -C "$LIBKRUN" diff --stat | tee acceptance-logs/libkrun-red-adapter.log
+          test -z "$(git -C "$LIBKRUN" diff --name-only | grep -v '/tests\.rs$')"
           cargo fetch --manifest-path "$LIBKRUN/Cargo.toml"
           {
             rc=0

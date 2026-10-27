@@ -416,15 +416,7 @@ impl ExecutionState {
         let (tx, rx) = mpsc::channel(100);
         let execution_id = exec_id.to_owned();
         let task = tokio::spawn(async move {
-            loop {
-                // End as soon as the consumer goes away, not at the next
-                // output: the stream holds the attach lease, and a quiet
-                // execution would keep it from every later attach.
-                let message = tokio::select! {
-                    _ = tx.closed() => break,
-                    message = output.next() => message,
-                };
-                let Some(message) = message else { break };
+            while let Some(message) = output.next().await {
                 if tx.send(message).await.is_err() {
                     break;
                 }
