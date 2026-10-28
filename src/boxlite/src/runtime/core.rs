@@ -389,11 +389,8 @@ impl BoxliteRuntime {
         &self,
         path: impl AsRef<std::path::Path>,
         options: crate::runtime::options::CheckpointImportOptions,
-        provider: &dyn crate::CheckpointImportProvider,
     ) -> BoxliteResult<LiteBox> {
-        self.backend
-            .import_checkpoint(path.as_ref(), options, provider)
-            .await
+        self.backend.import_checkpoint(path.as_ref(), options).await
     }
 
     /// Inspect memory checksums and required bindings without opening shares or
