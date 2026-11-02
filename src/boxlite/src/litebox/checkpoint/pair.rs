@@ -70,6 +70,8 @@ pub struct CheckpointDependencies {
     pub disk_dependencies: serde_json::Value,
     #[serde(skip_serializing)]
     pub(crate) application: serde_json::Value,
+    #[serde(skip_serializing)]
+    pub(crate) compatibility: serde_json::Value,
 }
 
 pub(crate) struct VerifiedPair {
@@ -468,10 +470,22 @@ pub(crate) fn inspect_memory(mut memory: &File) -> BoxliteResult<CheckpointDepen
             .map(Into::into),
         disk_dependencies: metadata["disk_dependencies"].clone(),
         application: metadata["application"].clone(),
+        compatibility: metadata["compatibility"].clone(),
     })
 }
 
 pub(crate) fn open(path: &Path) -> BoxliteResult<VerifiedPair> {
+    let (memory, disk) = open_files(path)?;
+    let dependencies = inspect_memory(&memory)?;
+    Ok(VerifiedPair {
+        memory,
+        disk,
+        dependencies,
+    })
+}
+
+/// Pin the input files without inspecting mutable source bytes before staging.
+pub(crate) fn open_files(path: &Path) -> BoxliteResult<(File, File)> {
     if !std::fs::symlink_metadata(path).map_err(invalid)?.is_dir() {
         return Err(invalid(
             "unsupported checkpoint version/format; version 9 two-file directory required",
@@ -504,7 +518,7 @@ pub(crate) fn open(path: &Path) -> BoxliteResult<VerifiedPair> {
             libc::openat(
                 directory.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
             )
         };
         if fd < 0 {
@@ -519,12 +533,7 @@ pub(crate) fn open(path: &Path) -> BoxliteResult<VerifiedPair> {
     };
     let memory = child(MEMORY)?;
     let disk = child(DISK)?;
-    let dependencies = inspect_memory(&memory)?;
-    Ok(VerifiedPair {
-        memory,
-        disk,
-        dependencies,
-    })
+    Ok((memory, disk))
 }
 
 fn directory_names(directory: &File) -> BoxliteResult<Vec<std::ffi::OsString>> {

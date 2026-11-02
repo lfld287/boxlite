@@ -241,9 +241,27 @@ Cloud checkpoint storage, upload/download, an organization catalog and
 cross-region creation of a new Paused Box are planned in the
 [cloud checkpoint design](../contributing/investigations/2026-11-02-cloud-memory-checkpoints.md).
 The existing two-file export and direct REST transfer do not include the read-only
-boot disk or create a durable cloud resource. A future cloud package will carry
-the exact boot disk; volumes will still refer to their original resources and
-current contents. Cross-region restore will require a compatible Runner and
+boot disk or create a durable cloud resource. The low-level Rust
+`checkpoint_package::pack(pair_directory, boot_disk, options, limits)` prepares
+an anonymous local tar+zstd package with `manifest.json` first, followed by the
+unchanged `snapshot.mem`, `snapshot.qcow2` and exact `boot.ext4`. It verifies
+private copies of pinned input files and refuses a boot length or SHA-256 that
+differs from the native checkpoint metadata. This blocking file API belongs on
+a blocking thread when called from async code.
+
+Callers must supply compressed, expanded and per-payload byte limits. Expanded
+bytes include tar headers and padding; the manifest is capped at 16 MiB. Map every
+saved `uservol{index}` share to its original volume ID and optional normalized
+relative subpath, such as `tenant/data`. Mount targets and read-only attributes
+come from saved configuration. Missing, duplicate or extra mappings, conflicting
+native access attributes, cache volumes and typed mounts are refused. The encoder
+does not open saved source share roots or the saved boot path, authorize volumes,
+or collect a new runtime compatibility profile.
+
+Package decoding, CLI/SDK cloud operations and VM restoration from this package
+are not available yet. Packaging proves artifact integrity and internal
+consistency; volumes still refer to their original resources and current
+contents. Cross-region restore will require a compatible Runner and
 explicit resume, with callers coordinating external writers and data consistency.
 These cloud operations are not available in this release candidate.
 

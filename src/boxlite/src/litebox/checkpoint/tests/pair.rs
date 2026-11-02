@@ -27,8 +27,11 @@ pub(crate) fn fixture() -> tempfile::TempDir {
     directory
 }
 fn seal(directory: &Path, metadata: &serde_json::Value) {
+    seal_payload(directory, metadata, &vec![0; 4096]);
+}
+
+pub(crate) fn seal_payload(directory: &Path, metadata: &serde_json::Value, payload: &[u8]) {
     let metadata = serde_json::to_vec(metadata).unwrap();
-    let payload = vec![0u8; 4096];
     let disk = File::open(directory.join(DISK)).unwrap();
     let disk_bytes = disk.metadata().unwrap().len();
     let mut header = [0u8; 160];
@@ -44,12 +47,12 @@ fn seal(directory: &Path, metadata: &serde_json::Value) {
         header[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
     header[48..80].copy_from_slice(&Sha256::digest(&metadata));
-    header[80..112].copy_from_slice(&Sha256::digest(&payload));
+    header[80..112].copy_from_slice(&Sha256::digest(payload));
     header[112..144].copy_from_slice(&digest(&disk, 0, disk_bytes).unwrap());
     let mut file = File::create(directory.join(MEMORY)).unwrap();
     file.write_all(&header).unwrap();
     file.write_all(&metadata).unwrap();
-    file.write_all(&payload).unwrap();
+    file.write_all(payload).unwrap();
 }
 
 #[test]

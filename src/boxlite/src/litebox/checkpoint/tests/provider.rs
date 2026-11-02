@@ -35,6 +35,7 @@ fn share(root: &Path) -> ShareDependency {
 }
 fn dependencies(share: ShareDependency) -> CheckpointDependencies {
     CheckpointDependencies {
+        compatibility: serde_json::json!({}),
         version: 9,
         cpus: 1,
         memory_bytes: 4096,

@@ -55,14 +55,15 @@ compatibility with every native version-9 image.
 | --- | --- |
 | `format`, `version` | `boxlite-memory-checkpoint`, integer `1`; reject unsupported versions/required features. |
 | `files` | Three payload names, lengths and lowercase SHA-256; verify native envelope, disk and boot agreement too. |
-| `compatibility` | Producer runtime/VMM build identities, schema/features, Linux/x86_64/KVM and CPU/KVM requirements, allocations/ceilings; cannot relax native checks. |
+| `compatibility` | Preserve the native compatibility object and native/application/path schema versions. Runtime/VMM identity collection and Runner compatibility decisions are deferred; do not invent a producer profile. |
+| `resources` | Preserve saved allocations and native CPU/RAM/disk sizes and ceilings; cannot relax native checks. |
 | `volumes` | Each external volume share: stable `share_tag`, original `volume_id`, normalized `subpath`, guest `mount_path`, `read_only`; exact coverage, unique tags, matching native mount attributes. |
 | `source` | Optional Box ID/capture region; uploaded provenance is informational. Authenticated control plane owns organization, resource ID and storage placement. |
 
 Bound manifest to 16 MiB; enforce configured compressed/expanded and per-file
 limits with checked arithmetic, independent of untrusted declarations. Reject
 duplicate JSON keys, missing/extra/duplicate archive entries, traversal, links,
-special files, tar extensions, truncation and hidden trailers. Checksums detect
+special files, tar extension entries, truncation and hidden trailers. Checksums detect
 corruption, not authority. Use private staging, bounded buffers, verification,
 fsync and atomic no-overwrite publication; remove only attempt-owned temporaries.
 
@@ -164,6 +165,75 @@ resume. It reads the original volume's current data. Uploading the download
 creates a catalog resource without a Box.
 
 ## Validation and implementation gates
+
+### Stage 2a: local package encoding
+
+Implement only `checkpoint_package::pack(pair_directory, boot_disk, options,
+limits) -> File` in this commit. The returned anonymous temporary file is complete
+and rewound. No catalog, network, mount service, VM operation, publication or
+restore compatibility decision runs. Stage 2b will add strict decoding and the
+temporary-directory-owning `VerifiedPackage`; it is not part of 2a acceptance.
+
+Research for this slice, checked against the working tree:
+
+| Question and source | Observation and decision |
+| --- | --- |
+| Can the pair verifier be reused? [`pair::open`, `inspect_memory`, `verify_disk`](../../../src/boxlite/src/litebox/checkpoint/pair.rs) | It pins both child descriptors, bounds native metadata and verifies memory/QCOW2, but verifies the source before copying. Separate descriptor opening from verification internally; copy pinned descriptors into private staging, then run the existing verifier on the copies. Rechecking a source path would allow replacement to redirect the archive. Keep the direct transport's public contract unchanged. |
+| Where do volume tags and attributes come from? [`resolve_user_volumes`](../../../src/boxlite/src/litebox/init/types.rs#L50), [`target_paths`](../../../src/boxlite/src/runtime/checkpoint_import.rs#L42), [`vmm_spawn`](../../../src/boxlite/src/litebox/init/tasks/vmm_spawn.rs#L225) | Saved `options.volumes` order defines `uservol{index}`; guest target and access come from those options. The resolver opens source paths, so it cannot be reused here. Match tags and access against native shares without resolving host paths. Exclude only the known internal shared root and VM-owned boot root; reject unsupported external shares and typed/cache mounts. |
+| How is a bounded archive finished? [tar `append` and `into_inner`](https://docs.rs/tar/0.4.44/tar/struct.Builder.html#method.append), [zstd 0.13.3 encoder source](https://docs.rs/zstd/0.13.3/src/zstd/stream/write/mod.rs.html), [temporary-file ownership](https://docs.rs/tempfile/3.27.0/tempfile/fn.tempfile.html#resource-leaking) | Write explicit USTAR headers for four fixed short names, finish tar and zstd explicitly, propagate errors, sync and rewind the file. Use counted writers above and below compression; count headers, padding and the footer. Anonymous output is removed when its last descriptor closes. Appending source paths or returning an unfinished encoder would weaken this contract. |
+| How will decoding be constrained? [zstd `single_frame` and `window_log_max`](https://docs.rs/zstd/0.13.3/zstd/stream/read/struct.Decoder.html#method.single_frame) | The decoder normally concatenates frames. Stage 2b must stop after one frame, check buffered and remaining input, limit the window to 64 MiB, and count all expanded bytes. A default decoder plus tar iteration alone cannot enforce the proposed package boundary. |
+
+The archive order is `manifest.json`, `snapshot.mem`, `snapshot.qcow2`,
+`boot.ext4`. The manifest uses format `boxlite-memory-checkpoint`, version 1,
+exact payload-name keys with length and lowercase SHA-256, native compatibility,
+schema versions, saved/native resources, volume references and optional source
+Box ID/region. It contains no newly collected runtime identity. Native bytes retain
+their saved source paths; encoding never opens those saved paths.
+
+Payload size fields may use tar's base-256 numeric encoding, which tar 0.4.45
+selects at 8 GiB; imposing octal-only USTAR sizes would exclude large memory/disk
+images. This is permitted within an ordinary file header. GNU/PAX extension
+entries remain forbidden. Stage 2b must accept this numeric encoding with checked
+size parsing and the same caller limits.
+
+Open the pair directory and all three input files once with no-follow regular-file
+checks. Copy using fixed buffers and explicit per-file bounds into an attempt-owned
+private directory with a separate `pair/` child. Concurrent source modification may
+make verification fail; a successful archive always contains exactly the staged,
+verified bytes. Verify path metadata v2, the native pair and saved resource
+allocation, then compare staged boot length and SHA-256 with native boot metadata.
+Do not change either original pair file.
+
+Options carry a list of `(share_tag, volume_id, optional subpath)` mappings and
+optional informational provenance. Require a nonempty volume ID, unique tags and
+exact coverage of saved user-volume shares. Derive guest mount paths and read-only
+attributes from saved options; reject conflicting native share access, missing or
+extra shares/mappings, and unsupported mount origins. Subpaths must already be
+normalized relative slash-separated paths: reject empty values, absolute paths,
+`.`/`..`, repeated/trailing separators, backslashes and NULs. No organization
+authorization or source-directory existence check is implied by this validation.
+
+Require explicit compressed, expanded, memory, QCOW2 and boot byte limits, with no
+unlimited default. Check arithmetic, enforce copy bounds before staging bytes, cap
+serialized manifest output at 16 MiB, and enforce archive bounds while writing.
+Use zstd level 1, a checksum and a window no greater than 64 MiB. RAII removes
+attempt-owned staging and output on every error; no named destination is published.
+This blocking file API must run outside an async executor thread, as with the
+existing transport codec.
+
+Validation for 2a uses the production pack entry point: inspect member order and
+manifest digests, compare all three decoded payloads byte-for-byte, reject wrong
+boot size/hash, malformed/corrupt pairs and v1 path metadata, exercise volume
+coverage/access/subpath conflicts, and check exact size boundaries and overflow.
+Read/write fault injection must exercise codec copy/encoding helpers; a filesystem
+failure must return an error without publishing output. These are new-feature
+tests, not a claim that a preexisting pack API exhibited a bug. Stage 2b owns
+round trips through the production unpack entry point and hostile archive tests.
+
+Run the scoped `checkpoint_package`, `checkpoint_pair` and
+`checkpoint_transport` Rust make suites, Rust formatting and Rust lint with
+dependency stubs where specified. Report environmental failures as blocked checks.
+No KVM, mounted-volume or cross-Runner restoration claim follows from these tests.
 
 | Claim/risk | Planned check and required result |
 | --- | --- |

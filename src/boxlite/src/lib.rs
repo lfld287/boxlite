@@ -11,6 +11,7 @@ use tracing_subscriber::EnvFilter;
 static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
 pub mod agents;
+pub mod checkpoint_package;
 #[doc(hidden)]
 pub mod checkpoint_transport;
 pub mod event_listener;
