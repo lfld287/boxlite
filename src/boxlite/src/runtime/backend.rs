@@ -78,6 +78,18 @@ pub(crate) trait RuntimeBackend: Send + Sync {
         ))
     }
 
+    /// Import with caller-supplied boot storage; no remote transfer contract yet.
+    async fn import_checkpoint_with_boot_disk(
+        &self,
+        _pair_directory: &Path,
+        _boot_disk: &Path,
+        _options: crate::runtime::options::CheckpointImportOptions,
+    ) -> BoxliteResult<LiteBox> {
+        Err(BoxliteError::Unsupported(
+            "checkpoint import with an explicit boot disk requires a local runtime".into(),
+        ))
+    }
+
     /// Synchronous shutdown for atexit/Drop contexts.
     /// Default no-op (REST backend doesn't manage local processes).
     fn shutdown_sync(&self) {}

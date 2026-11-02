@@ -101,7 +101,7 @@ publication is reported as success.
 
 ## Target paths and external files
 
-The Rust API uses the same path-only flow as the CLI:
+The existing Rust import uses the same path-only flow as the CLI:
 
 ```rust
 source.export_checkpoint("/srv/checkpoints/web").await?;
@@ -167,13 +167,44 @@ focused guest test uses aligned direct I/O for an absent whole object and `fsync
 for an absent handle. Later exports preserve allocation counters and omit missing
 backend records, so stale guest IDs cannot alias newly allocated objects.
 
-The readonly guest boot disk is external. Import checks the saved boot path's full
+With `import_checkpoint`, the readonly guest boot disk is external. Import checks the saved boot path's full
 length and digest, or uses an exact digest-matching entry in the importing runtime's
 cache when that path is absent. It never rebuilds a substitute on cache miss.
 The imported container disk is a private QCOW2 and stays private through resume,
 stopped cold starts, disk snapshots and later checkpoints. Share roots and the
 selected boot path persist across runtime restarts; a cold start creates a new guest
 session and does not recover old orphan handles.
+
+For a local unpacked package, Rust also accepts an explicit boot file:
+
+```rust
+let restored = runtime.import_checkpoint_with_boot_disk(
+    package.pair_directory(),
+    package.boot_disk(),
+    CheckpointImportOptions { name: Some("web-copy".into()) },
+).await?;
+drop(package);
+restored.resume().await?;
+```
+
+This entry point requires path metadata v2 and a local runtime. REST returns
+`Unsupported`; no HTTP, CLI or other SDK entry point is provided. Keep the package
+and its files unchanged until import returns. Import opens the supplied regular
+file without following a symlink and checks its full length and SHA-256 against
+native checkpoint metadata. Any error fails import; the saved boot path and cache
+are never consulted.
+
+The new Box owns a streamed, synced and reverified copy at `disks/boot.ext4` under
+its private directory. Restoration uses a read-only descriptor. Both persisted
+restored storage and checkpoint paths reference this copy, so releasing the
+package after successful import is safe. Cold starts revalidate and reuse the
+copy; removing the Box removes it. Failed or cancelled imports clean up their own
+directory after the copy worker finishes.
+
+Volumes still come from the saved `BoxOptions`. Existing mechanisms must provide
+those prepared directories before import and keep them available for the Box's
+lifetime. This entry point creates no volume binding table or mount service and
+keeps the missing-file and DAX checks described above.
 
 ## Failure and compatibility
 

@@ -437,6 +437,7 @@ impl RuntimeImpl {
     pub async fn import_checkpoint(
         self: &Arc<Self>,
         path: &std::path::Path,
+        boot_disk: Option<&std::path::Path>,
         options: crate::runtime::options::CheckpointImportOptions,
     ) -> BoxliteResult<LiteBox> {
         if self.shutdown_token.is_cancelled() {
@@ -444,7 +445,7 @@ impl RuntimeImpl {
                 "Cannot import checkpoint: runtime has been shut down".into(),
             ));
         }
-        super::checkpoint_import::import_checkpoint(self, path, options).await
+        super::checkpoint_import::import_checkpoint(self, path, boot_disk, options).await
     }
 
     /// Inner create logic shared by `create()` and `get_or_create()`.
@@ -1931,7 +1932,18 @@ impl super::backend::RuntimeBackend for LocalRuntime {
         path: &std::path::Path,
         options: crate::runtime::options::CheckpointImportOptions,
     ) -> BoxliteResult<LiteBox> {
-        self.0.import_checkpoint(path, options).await
+        self.0.import_checkpoint(path, None, options).await
+    }
+
+    async fn import_checkpoint_with_boot_disk(
+        &self,
+        pair_directory: &std::path::Path,
+        boot_disk: &std::path::Path,
+        options: crate::runtime::options::CheckpointImportOptions,
+    ) -> BoxliteResult<LiteBox> {
+        self.0
+            .import_checkpoint(pair_directory, Some(boot_disk), options)
+            .await
     }
 
     fn shutdown_sync(&self) {

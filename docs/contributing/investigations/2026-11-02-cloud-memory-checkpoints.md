@@ -235,6 +235,46 @@ Run the scoped `checkpoint_package`, `checkpoint_pair` and
 dependency stubs where specified. Report environmental failures as blocked checks.
 No KVM, mounted-volume or cross-Runner restoration claim follows from these tests.
 
+### Stage 3: local import with a packaged boot disk
+
+Add `BoxliteRuntime::import_checkpoint_with_boot_disk(pair_directory, boot_disk,
+options)` for local path metadata v2. The existing import and options keep their
+contracts. REST returns Unsupported without HTTP requests.
+No volume binding table, mount service, HTTP/CLI/SDK
+extension or virtiofs missing-object change belongs to this slice.
+
+Research rechecked against `1ce20827` and the installed Tokio 1.52.2 source:
+
+| Question and original source | Observation → decision; alternative |
+| --- | --- |
+| Where is boot identity authoritative? [`checkpoint_import.rs:108–173`](../../../src/boxlite/src/runtime/checkpoint_import.rs), [`pair::digest`](../../../src/boxlite/src/litebox/checkpoint/pair.rs) | Native disk dependency index 1 records full length and SHA-256. Extract boot preparation for both entry points. Explicit boot bypasses saved-path/cache lookup entirely; open once with no-follow, close-on-exec and nonblocking flags, require a regular file, then verify native identity. Nonblocking opening prevents FIFOs from hanging before the type check. Preserve saved-path/cache selection and pins for ordinary import. |
+| Can package storage outlive its owner? [`VerifiedPackage`](../../../src/boxlite/src/checkpoint_package/unpack.rs), [`RestoredStorage::guest_disk`](../../../src/boxlite/src/litebox/checkpoint.rs) | Package drop deletes its extraction directory. A borrowed path or retained FD alone cannot support a later cold start. Stream explicit boot into `disks/boot.ext4` in the new Box directory with create-new/0600, sync, reopen read-only and recheck length/hash. Persist this path in both restored storage and checkpoint paths; no cache reference is needed for a private copy. Caller retains package/input files unchanged until import returns. |
+| When may cleanup run? [`Attempt::drop`](../../../src/boxlite/src/runtime/checkpoint_import.rs), installed `tokio-1.52.2/src/task/blocking.rs:106–122` ([upstream source](https://docs.rs/tokio/1.52.2/src/tokio/task/blocking.rs.html)) | A started blocking task cannot be aborted. Merely awaiting a copy while keeping Attempt in its parent permits executor teardown to remove output under the writer. Transfer Attempt into the blocking disk-preparation task; return it only after all copies/checks end. On error or dropped result, the worker owns cleanup. Keep cancellation checks between bounded chunks and the existing Paused/publication sequence. |
+| How are volumes and cold starts prepared? [`target_paths`](../../../src/boxlite/src/runtime/checkpoint_import.rs), [`build_config`](../../../src/boxlite/src/litebox/init/tasks/vmm_spawn.rs) | V2 resolves saved BoxOptions volumes into prepared roots; cold boot validates and reuses RestoredStorage. Keep this mechanism, including managed-volume/typed-mount restrictions and strict missing-file/DAX checks. Explicit boot changes only the boot dependency; directories must already be provided by existing mechanisms. |
+
+The common preparation boundary opens the native pair, validates application and
+resource metadata, prepares target paths/bindings and copies disks before VM
+launch. Extract a small disk-preparation operation so tests exercise the same
+native boot verification, private copy and ownership used by import, without
+requiring a supported host or spawning a VM. Copy output is bounded by the native
+boot length; mutations/truncation/growth must fail final verification. Existing
+QCOW2 copying keeps its cancellation behavior. The new Box directory must be
+created successfully before Attempt claims ownership; create-new never overwrites
+another output. Failed preparation removes only that attempt's directory.
+
+| Claim/risk | Planned check → expected result |
+| --- | --- |
+| Packaged boot independence | Pack/unpack through production codec, remove source boot, run production disk preparation → private readonly boot survives package drop. |
+| Fail-closed identity/copy | Wrong length/hash, symlink/directory/FIFO, missing explicit path despite usable saved boot, create-new conflict and cancellation → error, preserve inputs/unrelated resources. |
+| Persistence/cold starts | Save/reload BoxState through the existing store, validate guest_disk after package drop; run existing restored cold-start pipeline test → private boot selected without cache/source lookup. |
+| Compatibility | Exercise ordinary saved path and cache selection, v1 rejection only for explicit boot, BoxOptions target-volume resolution; run checkpoint suite including missing-file/DAX cases. |
+| Required tooling | `BOXLITE_DEPS_STUB=1 make test:unit:rust FILTER=checkpoint`, existing cold-start test, `make fmt:check:rust`, `BOXLITE_DEPS_STUB=1 make lint:rust`; allow localhost REST listeners. Report environmental failures separately. |
+
+Validation on macOS: the checkpoint make suite passed 64 core and 68 REST-enabled
+tests; the existing restored cold-start test passed in both configurations. Rust format and lint
+passed. Linux-only provider missing-file/DAX tests were not compiled on this host.
+These preparation tests do not establish real VM or cross-Runner restoration.
+
 ### Stage 2b: strict local decoding
 
 Starting at `9b6290d3`, add blocking `unpack(archive: File, limits: Limits)`.

@@ -447,6 +447,25 @@ impl BoxliteRuntime {
         self.backend.import_checkpoint(path.as_ref(), options).await
     }
 
+    /// Import a checkpoint pair with an explicit readonly boot disk, paused.
+    ///
+    /// Local runtimes only; requires path metadata v2 and prepared volume
+    /// directories from the saved `BoxOptions`. The boot file must match the
+    /// native length and SHA-256; errors never fall back to saved paths or cache.
+    /// Keep inputs unchanged until this returns. A successful import owns a
+    /// private boot copy for its lifetime, including subsequent cold starts, so
+    /// the caller may then release its unpacked checkpoint package.
+    pub async fn import_checkpoint_with_boot_disk(
+        &self,
+        pair_directory: impl AsRef<std::path::Path>,
+        boot_disk: impl AsRef<std::path::Path>,
+        options: crate::runtime::options::CheckpointImportOptions,
+    ) -> BoxliteResult<LiteBox> {
+        self.backend
+            .import_checkpoint_with_boot_disk(pair_directory.as_ref(), boot_disk.as_ref(), options)
+            .await
+    }
+
     /// Inspect memory checksums and required bindings without opening shares or
     /// provisioning a box. Import separately verifies the paired QCOW2.
     pub fn inspect_checkpoint(

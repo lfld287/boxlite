@@ -78,6 +78,7 @@ fn target_paths(
 pub(crate) async fn import_checkpoint(
     runtime: &SharedRuntimeImpl,
     path: &Path,
+    boot_disk: Option<&Path>,
     options: CheckpointImportOptions,
 ) -> BoxliteResult<LiteBox> {
     support::check_host(Host::current())?;
@@ -96,64 +97,6 @@ pub(crate) async fn import_checkpoint(
         .check(resources.max_cpus, resources.max_memory_mib)?;
     let container_id = ContainerID::parse(&application.guest.container_id)
         .ok_or_else(|| invalid("invalid saved container ID"))?;
-    let boot_dependency = pair
-        .dependencies
-        .disk_dependencies
-        .as_array()
-        .and_then(|disks| disks.get(1))
-        .and_then(|disk| disk.get("external_readonly_boot"))
-        .ok_or_else(|| invalid("exact readonly boot dependency missing"))?;
-    let boot_hash: [u8; 32] =
-        serde_json::from_value(boot_dependency["sha256"].clone()).map_err(invalid)?;
-    let boot_length = boot_dependency["length"]
-        .as_u64()
-        .ok_or_else(|| invalid("invalid boot length"))?;
-    let mut cached_pin = None;
-    let boot_path = if local_paths.boot_disk.try_exists().map_err(invalid)? {
-        local_paths.boot_disk.clone()
-    } else {
-        let records = runtime
-            .base_disk_mgr
-            .store()
-            .list_by_box("__global__", Some(crate::disk::BaseDiskKind::Rootfs))?;
-        let mut found = None;
-        for record in records {
-            let path = PathBuf::from(record.base_path());
-            let file = match File::open(&path) {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(invalid(error)),
-            };
-            if file.metadata().map_err(invalid)?.len() == boot_length
-                && pair::digest(&file, 0, boot_length)? == boot_hash
-            {
-                cached_pin = Some(record.id().clone());
-                found = Some(path);
-                break;
-            }
-        }
-        found.ok_or_else(|| {
-            invalid("exact readonly boot disk is absent at its saved path and in the runtime cache")
-        })?
-    };
-    let boot_path = boot_path.canonicalize().map_err(invalid)?;
-    if cached_pin.is_none() {
-        cached_pin = runtime
-            .base_disk_mgr
-            .store()
-            .find_by_base_path(&boot_path.to_string_lossy())?
-            .map(|record| record.id().clone());
-    }
-    let boot = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&boot_path)
-        .map_err(invalid)?;
-    if boot.metadata().map_err(invalid)?.len() != boot_length
-        || pair::digest(&boot, 0, boot_length)? != boot_hash
-    {
-        return Err(invalid("readonly boot dependency length/checksum mismatch"));
-    }
     if local_paths.version == 1 {
         for (index, volume) in box_options.volumes.iter_mut().enumerate() {
             if let Some(root) = local_paths.shares.get(&format!("uservol{index}")) {
@@ -163,6 +106,7 @@ pub(crate) async fn import_checkpoint(
         }
     }
     box_options.sanitize()?;
+    let boot_disk = boot_disk.map(Path::to_path_buf);
     let runtime = runtime.clone();
     let worker_runtime = runtime.clone();
     let cancellation = runtime.shutdown_token.child_token();
@@ -172,7 +116,7 @@ pub(crate) async fn import_checkpoint(
         let box_id = BoxIDMint::mint();
         let layout = runtime.layout.box_layout(box_id.as_str(), false)?;
         std::fs::create_dir(layout.root()).map_err(invalid)?;
-        let mut attempt = Attempt {
+        let attempt = Attempt {
             runtime: runtime.clone(),
             layout: layout.clone(),
             handler: None,
@@ -188,33 +132,18 @@ pub(crate) async fn import_checkpoint(
             local_paths = target_paths(&local_paths, &box_options, &container_id, &layout)?;
         }
         let mut bindings = LocalCheckpointProvider::bind(&pair.dependencies, &local_paths)?;
-        let private_disk = layout.root().join("disks/disk.qcow2");
-        let copy_path = private_disk.clone();
-        let source = pair.disk;
+        // A blocking writer owns Attempt until all output is closed and verified.
+        // Dropping its async waiter must not remove the directory under it.
         let copy_cancellation = cancellation.clone();
-        tokio::task::spawn_blocking(move || {
-            use std::io::{Read, Write};
-            let mut source = source;
-            let mut output = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(copy_path)
-                .map_err(invalid)?;
-            let mut buffer = vec![0; 1 << 20];
-            loop {
-                if copy_cancellation.is_cancelled() {
-                    return Err(BoxliteError::Stopped(
-                        "checkpoint import copy cancelled".into(),
-                    ));
-                }
-                let count = source.read(&mut buffer).map_err(invalid)?;
-                if count == 0 {
-                    break;
-                }
-                output.write_all(&buffer[..count]).map_err(invalid)?;
-            }
-            output.sync_all().map_err(invalid)
+        let (mut attempt, pair, boot, mut local_paths) = tokio::task::spawn_blocking(move || {
+            prepare_disks(
+                attempt,
+                pair,
+                &local_paths,
+                boot_disk.as_deref(),
+                &copy_cancellation,
+            )
+            .map(|(attempt, pair, boot)| (attempt, pair, boot, local_paths))
         })
         .await
         .map_err(invalid)??;
@@ -223,9 +152,10 @@ pub(crate) async fn import_checkpoint(
                 "checkpoint import cancelled before spawn".into(),
             ));
         }
+        let private_disk = layout.disks_dir().join("disk.qcow2");
         let mut files: Vec<OwnedFd> = vec![
             File::open(&private_disk).map_err(invalid)?.into(),
-            boot.into(),
+            boot.file.into(),
         ];
         // The container backend must be writable and private, never the input pair.
         files[0] = OpenOptions::new()
@@ -314,18 +244,14 @@ pub(crate) async fn import_checkpoint(
                     read_only: false,
                 },
                 RestoredDisk {
-                    path: boot_path,
+                    path: boot.path,
                     format: crate::vmm::DiskFormat::Raw,
                     read_only: true,
                 },
             ],
             shared_dir: shared_dir.ok_or_else(|| invalid("BoxLiteShared root is not bound"))?,
             container_image_config: application.container_image_config.clone(),
-            boot: Some(crate::litebox::checkpoint::BootDependency {
-                length: boot_length,
-                sha256: boot_hash,
-                base_id: cached_pin.clone(),
-            }),
+            boot: Some(boot.dependency.clone()),
         };
         let launch = ImportLaunch {
             console_output: layout.console_output_path(),
@@ -414,7 +340,7 @@ pub(crate) async fn import_checkpoint(
         let lock = runtime.lock_manager.allocate()?;
         attempt.lock = Some(lock);
         state.set_lock_id(lock);
-        if let Some(pin) = &cached_pin {
+        if let Some(pin) = &boot.dependency.base_id {
             runtime
                 .base_disk_mgr
                 .store()
@@ -440,6 +366,188 @@ pub(crate) async fn import_checkpoint(
     drop(canceller);
     Ok(crate::runtime::rt_impl::litebox_from_impl(box_impl))
 }
+
+/// A pinned boot descriptor and the path/identity retained by the imported box.
+struct BootDisk {
+    file: File,
+    path: PathBuf,
+    dependency: crate::litebox::checkpoint::BootDependency,
+}
+
+impl BootDisk {
+    fn open(
+        runtime: &SharedRuntimeImpl,
+        dependencies: &pair::CheckpointDependencies,
+        local_paths: &LocalPaths,
+        explicit: Option<&Path>,
+    ) -> BoxliteResult<Self> {
+        let boot_dependency = dependencies
+            .disk_dependencies
+            .as_array()
+            .and_then(|disks| disks.get(1))
+            .and_then(|disk| disk.get("external_readonly_boot"))
+            .ok_or_else(|| invalid("exact readonly boot dependency missing"))?;
+        let boot_hash: [u8; 32] =
+            serde_json::from_value(boot_dependency["sha256"].clone()).map_err(invalid)?;
+        let boot_length = boot_dependency["length"]
+            .as_u64()
+            .ok_or_else(|| invalid("invalid boot length"))?;
+        let mut cached_pin = None;
+        let boot_path = if let Some(path) = explicit {
+            if local_paths.version != 2 {
+                return Err(BoxliteError::Unsupported(
+                    "explicit boot import requires checkpoint path metadata v2".into(),
+                ));
+            }
+            path.to_path_buf()
+        } else if local_paths.boot_disk.try_exists().map_err(invalid)? {
+            local_paths.boot_disk.clone()
+        } else {
+            let records = runtime
+                .base_disk_mgr
+                .store()
+                .list_by_box("__global__", Some(crate::disk::BaseDiskKind::Rootfs))?;
+            let mut found = None;
+            for record in records {
+                let path = PathBuf::from(record.base_path());
+                let file = match File::open(&path) {
+                    Ok(file) => file,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(invalid(error)),
+                };
+                if file.metadata().map_err(invalid)?.len() == boot_length
+                    && pair::digest(&file, 0, boot_length)? == boot_hash
+                {
+                    cached_pin = Some(record.id().clone());
+                    found = Some(path);
+                    break;
+                }
+            }
+            found.ok_or_else(|| {
+                invalid(
+                    "exact readonly boot disk is absent at its saved path and in the runtime cache",
+                )
+            })?
+        };
+        let boot_path = if explicit.is_some() {
+            boot_path
+        } else {
+            boot_path.canonicalize().map_err(invalid)?
+        };
+        if explicit.is_none() && cached_pin.is_none() {
+            cached_pin = runtime
+                .base_disk_mgr
+                .store()
+                .find_by_base_path(&boot_path.to_string_lossy())?
+                .map(|record| record.id().clone());
+        }
+        let boot = OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | if explicit.is_some() {
+                        libc::O_NONBLOCK
+                    } else {
+                        0
+                    },
+            )
+            .open(&boot_path)
+            .map_err(invalid)?;
+        if explicit.is_some() && !boot.metadata().map_err(invalid)?.is_file() {
+            return Err(invalid("explicit boot disk must be a regular file"));
+        }
+        if boot.metadata().map_err(invalid)?.len() != boot_length
+            || pair::digest(&boot, 0, boot_length)? != boot_hash
+        {
+            return Err(invalid("readonly boot dependency length/checksum mismatch"));
+        }
+        Ok(Self {
+            file: boot,
+            path: boot_path,
+            dependency: crate::litebox::checkpoint::BootDependency {
+                length: boot_length,
+                sha256: boot_hash,
+                base_id: cached_pin,
+            },
+        })
+    }
+
+    fn copy_private(
+        &mut self,
+        path: PathBuf,
+        cancellation: &tokio_util::sync::CancellationToken,
+    ) -> BoxliteResult<()> {
+        copy_disk(&mut self.file, &path, self.dependency.length, cancellation)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)
+            .map_err(invalid)?;
+        if file.metadata().map_err(invalid)?.len() != self.dependency.length
+            || pair::digest(&file, 0, self.dependency.length)? != self.dependency.sha256
+        {
+            return Err(invalid("private boot dependency length/checksum mismatch"));
+        }
+        self.file = file;
+        self.path = path;
+        Ok(())
+    }
+}
+
+/// Ownership stays here even if the async caller disappears during copying.
+fn prepare_disks(
+    attempt: Attempt,
+    mut pair: pair::VerifiedPair,
+    paths: &LocalPaths,
+    explicit_boot: Option<&Path>,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> BoxliteResult<(Attempt, pair::VerifiedPair, BootDisk)> {
+    let mut boot = BootDisk::open(&attempt.runtime, &pair.dependencies, paths, explicit_boot)?;
+    copy_disk(
+        &mut pair.disk,
+        &attempt.layout.disks_dir().join("disk.qcow2"),
+        u64::MAX,
+        cancellation,
+    )?;
+    if explicit_boot.is_some() {
+        boot.copy_private(attempt.layout.disks_dir().join("boot.ext4"), cancellation)?;
+    }
+    Ok((attempt, pair, boot))
+}
+
+fn copy_disk(
+    mut source: impl std::io::Read,
+    path: &Path,
+    mut remaining: u64,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> BoxliteResult<()> {
+    use std::io::Write;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(invalid)?;
+    let mut buffer = vec![0; 1 << 20];
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(BoxliteError::Stopped(
+                "checkpoint import copy cancelled".into(),
+            ));
+        }
+        let count = source.read(&mut buffer).map_err(invalid)?;
+        if count == 0 {
+            break;
+        }
+        remaining = remaining
+            .checked_sub(count as u64)
+            .ok_or_else(|| invalid("checkpoint disk exceeds expected length"))?;
+        output.write_all(&buffer[..count]).map_err(invalid)?;
+    }
+    output.sync_all().map_err(invalid)
+}
+
 /// Wait until the owner reports the restored VM paused. The shim dying,
 /// any other state, or the deadline fails the import.
 async fn wait_paused(
@@ -547,59 +655,5 @@ impl Drop for Attempt {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn checkpoint_target_paths_rebuild_normal_dirs_without_fabricating_internal_files() {
-        let home = tempfile::tempdir().unwrap();
-        let external = tempfile::tempdir().unwrap();
-        let layout = BoxFilesystemLayout::new(
-            home.path().join("box"),
-            crate::runtime::layout::FsLayoutConfig::without_bind_mount(),
-            false,
-        );
-        std::fs::create_dir_all(layout.shared_dir()).unwrap();
-        let id = ContainerID::new();
-        let options = crate::BoxOptions {
-            volumes: vec![crate::runtime::options::VolumeSpec::bind_mount(
-                external.path().to_str().unwrap(),
-                "/data",
-            )],
-            ..Default::default()
-        };
-        let saved = LocalPaths {
-            version: 2,
-            shares: Default::default(),
-            boot_disk: "/not-regenerated".into(),
-        };
-        let paths = target_paths(&saved, &options, &id, &layout).unwrap();
-        assert_eq!(
-            paths.shares["uservol0"].path,
-            external.path().canonicalize().unwrap()
-        );
-        let container = boxlite_shared::layout::SharedGuestLayout::new(layout.shared_dir())
-            .container(id.as_str());
-        for directory in [
-            container.rootfs_dir(),
-            container.upper_dir(),
-            container.work_dir(),
-            container.volume_dir("uservol0"),
-        ] {
-            assert!(directory.is_dir(), "{}", directory.display());
-        }
-        assert!(!container.exit_file().exists());
-        assert!(!layout.shared_dir().join("unknown-file").exists());
-        assert!(!paths.boot_disk.exists());
-        let missing = home.path().join("external-not-prepared");
-        let missing_options = crate::BoxOptions {
-            volumes: vec![crate::runtime::options::VolumeSpec::bind_mount(
-                missing.to_str().unwrap(),
-                "/data",
-            )],
-            ..Default::default()
-        };
-        assert!(target_paths(&saved, &missing_options, &id, &layout).is_err());
-        assert!(!missing.exists(), "import must never prepare external data");
-    }
-}
+#[path = "tests/checkpoint_import.rs"]
+mod tests;
