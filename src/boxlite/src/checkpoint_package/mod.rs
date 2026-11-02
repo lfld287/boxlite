@@ -1,4 +1,4 @@
-//! Local cloud-package encoding. Integrity does not imply restore compatibility.
+//! Local cloud-package codec. Integrity does not imply restore compatibility.
 use crate::litebox::checkpoint::pair::{self, DISK, MEMORY, invalid};
 use crate::{BoxResources, BoxliteResult};
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,10 @@ const MANIFEST: &str = "manifest.json";
 const BOOT: &str = "boot.ext4";
 const MANIFEST_LIMIT: u64 = 16 << 20;
 
-/// Inclusive byte limits, required even for local encoding. No unlimited default.
+mod unpack;
+pub use unpack::{VerifiedPackage, unpack};
+
+/// Inclusive byte limits, required even for local use. No unlimited default.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
     pub compressed_bytes: u64,
@@ -23,7 +26,7 @@ pub struct Limits {
     pub boot_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolumeMapping {
     pub share_tag: String,
     pub volume_id: String,
@@ -32,7 +35,7 @@ pub struct VolumeMapping {
 }
 
 /// Informational provenance; never establishes ownership or authority.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     pub box_id: Option<String>,
     pub region: Option<String>,
@@ -44,13 +47,13 @@ pub struct PackOptions {
     pub source: Option<Source>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Artifact {
     pub length: u64,
     pub sha256: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Compatibility {
     pub native_version: u32,
     pub application_schema: u32,
@@ -58,7 +61,7 @@ pub struct Compatibility {
     pub native: serde_json::Value,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resources {
     pub allocation: BoxResources,
     pub cpus: u16,
@@ -68,7 +71,7 @@ pub struct Resources {
     pub container_disk_bytes: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VolumeReference {
     #[serde(flatten)]
     pub mapping: VolumeMapping,
@@ -76,7 +79,8 @@ pub struct VolumeReference {
     pub read_only: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub format: String,
     pub version: u32,
@@ -141,6 +145,33 @@ fn pack_staged(
         remaining -= copy_bounded(file, &mut output, limit).map_err(invalid)?;
     }
     let pair = pair::open(&pair_directory)?;
+    let boot = File::open(staging.path().join(BOOT)).map_err(invalid)?;
+    let manifest = verified_manifest(&pair, &boot, options)?;
+    let mut json = BoundedWriter {
+        inner: Vec::new(),
+        remaining: MANIFEST_LIMIT,
+    };
+    serde_json::to_writer(&mut json, &manifest).map_err(invalid)?;
+    let output = tempfile::tempfile().map_err(invalid)?;
+    encode(
+        output,
+        &json.inner,
+        [&pair.memory, &pair.disk, &boot],
+        limits,
+    )
+    .map_err(invalid)
+    .and_then(|mut output| {
+        output.sync_all().map_err(invalid)?;
+        output.seek(SeekFrom::Start(0)).map_err(invalid)?;
+        Ok(output)
+    })
+}
+
+fn verified_manifest(
+    pair: &pair::VerifiedPair,
+    boot: &File,
+    options: PackOptions,
+) -> BoxliteResult<Manifest> {
     pair.verify_disk()?;
     let dependencies = &pair.dependencies;
     if dependencies.application["local_paths"]["version"] != 2 {
@@ -149,8 +180,7 @@ fn pack_staged(
     let allocation =
         serde_json::from_value(dependencies.application["resources"].clone()).map_err(invalid)?;
     pair::validate_resources(allocation, dependencies)?;
-    let boot = File::open(staging.path().join(BOOT)).map_err(invalid)?;
-    let files = [(MEMORY, &pair.memory), (DISK, &pair.disk), (BOOT, &boot)]
+    let files = [(MEMORY, &pair.memory), (DISK, &pair.disk), (BOOT, boot)]
         .into_iter()
         .map(|(name, file)| {
             let length = file.metadata().map_err(invalid)?.len();
@@ -168,7 +198,7 @@ fn pack_staged(
     {
         return Err(invalid("package boot length/checksum mismatch"));
     }
-    let manifest = Manifest {
+    Ok(Manifest {
         format: "boxlite-memory-checkpoint".into(),
         version: 1,
         files,
@@ -188,24 +218,6 @@ fn pack_staged(
         },
         volumes: volumes(dependencies, options.volumes)?,
         source: options.source,
-    };
-    let mut json = BoundedWriter {
-        inner: Vec::new(),
-        remaining: MANIFEST_LIMIT,
-    };
-    serde_json::to_writer(&mut json, &manifest).map_err(invalid)?;
-    let output = tempfile::tempfile().map_err(invalid)?;
-    encode(
-        output,
-        &json.inner,
-        [&pair.memory, &pair.disk, &boot],
-        limits,
-    )
-    .map_err(invalid)
-    .and_then(|mut output| {
-        output.sync_all().map_err(invalid)?;
-        output.seek(SeekFrom::Start(0)).map_err(invalid)?;
-        Ok(output)
     })
 }
 

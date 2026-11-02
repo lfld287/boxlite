@@ -258,10 +258,34 @@ native access attributes, cache volumes and typed mounts are refused. The encode
 does not open saved source share roots or the saved boot path, authorize volumes,
 or collect a new runtime compatibility profile.
 
-Package decoding, CLI/SDK cloud operations and VM restoration from this package
-are not available yet. Packaging proves artifact integrity and internal
-consistency; volumes still refer to their original resources and current
-contents. Cross-region restore will require a compatible Runner and
+`checkpoint_package::unpack(archive, limits)` rewinds a local file and returns a
+`VerifiedPackage` only after strict decoding and native cross-checks. Its
+`manifest()` exposes the checked metadata; `pair_directory()` contains exactly
+`snapshot.mem` and `snapshot.qcow2`, and `boot_disk()` identifies the separate
+`boot.ext4`. The object privately owns these temporary files: retain it while
+using the paths, keep their bytes unchanged, and drop it to remove them. Failures
+remove attempt-owned staging without publishing a destination. Like packing,
+unpacking is blocking and does not open saved source paths.
+
+Decoding accepts any order of exactly four regular USTAR members with the fixed
+names above. It rejects duplicate or additional members, path variants, links,
+special files, extension entries, bad checksums, nonzero padding, truncation and
+hidden data. Exactly two zero tar footer blocks must end one ordinary zstd frame;
+second/skippable frames, compressed trailers and windows above 64 MiB fail.
+Compressed input, the complete expanded stream (including headers, padding and
+footer), each payload and the 16 MiB manifest cap are independently bounded.
+Octal and nonnegative base-256 lengths are supported with overflow checks.
+Recursive duplicate JSON keys (including escaped equivalents), excessive nesting,
+trailing JSON, unknown top-level fields and unsupported format/version fail.
+Both codec directions share native pair, exact boot, saved allocation and volume
+validation. Unpack also compares manifest lengths, digests, compatibility,
+resources and mount attributes against the extracted artifacts.
+
+Packaging and decoding prove artifact integrity and internal consistency;
+checksums do not establish authority. They do not authorize volume references,
+check external contents or prove VM/runtime compatibility. Volumes still refer
+to their original resources and current contents. CLI/SDK cloud operations and
+VM restoration from this package are not available yet. Cross-region restore will require a compatible Runner and
 explicit resume, with callers coordinating external writers and data consistency.
 These cloud operations are not available in this release candidate.
 

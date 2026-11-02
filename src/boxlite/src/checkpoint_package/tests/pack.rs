@@ -3,14 +3,14 @@ use sha2::{Digest, Sha256};
 use std::io::Cursor;
 use std::os::unix::fs::FileExt;
 
-struct Fixture {
-    pair: tempfile::TempDir,
-    boot: tempfile::NamedTempFile,
-    metadata: serde_json::Value,
+pub(super) struct Fixture {
+    pub(super) pair: tempfile::TempDir,
+    pub(super) boot: tempfile::NamedTempFile,
+    pub(super) metadata: serde_json::Value,
 }
 
 impl Fixture {
-    fn new(with_volume: bool) -> Self {
+    pub(super) fn new(with_volume: bool) -> Self {
         let pair = pair::tests::fixture();
         let bytes = std::fs::read(pair.path().join(MEMORY)).unwrap();
         let length = u64::from_le_bytes(bytes[24..32].try_into().unwrap()) as usize;
@@ -64,11 +64,11 @@ impl Fixture {
         fixture
     }
 
-    fn seal(&self) {
+    pub(super) fn seal(&self) {
         pair::tests::seal_payload(self.pair.path(), &self.metadata, &vec![0; 1 << 20]);
     }
 
-    fn options(&self) -> PackOptions {
+    pub(super) fn options(&self) -> PackOptions {
         PackOptions {
             volumes: if self.metadata["application"]["options"]["volumes"]
                 .as_array()
@@ -90,12 +90,12 @@ impl Fixture {
         }
     }
 
-    fn pack(&self, options: PackOptions, limits: Limits) -> BoxliteResult<File> {
+    pub(super) fn pack(&self, options: PackOptions, limits: Limits) -> BoxliteResult<File> {
         pack(self.pair.path(), self.boot.path(), options, limits)
     }
 }
 
-fn limits() -> Limits {
+pub(super) fn limits() -> Limits {
     Limits {
         compressed_bytes: 16 << 20,
         expanded_bytes: 16 << 20,

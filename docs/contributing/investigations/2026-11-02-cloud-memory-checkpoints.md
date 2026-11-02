@@ -235,6 +235,45 @@ Run the scoped `checkpoint_package`, `checkpoint_pair` and
 dependency stubs where specified. Report environmental failures as blocked checks.
 No KVM, mounted-volume or cross-Runner restoration claim follows from these tests.
 
+### Stage 2b: strict local decoding
+
+Starting at `9b6290d3`, add blocking `unpack(archive: File, limits: Limits)`.
+It rewinds input and returns `VerifiedPackage` only after validation. The object
+privately owns a temporary directory; `manifest()`, `pair_directory()` and
+`boot_disk()` borrow its verified metadata and paths. Dropping it removes
+`pair/{snapshot.mem,snapshot.qcow2}` and independent `boot.ext4`. There is no
+publication, upload, source-path lookup, mount or VM operation. This local design
+and independent research review use the explicitly authorized online-binding
+exemption for 2b.
+
+Research rechecked against 2a and the installed dependency sources:
+
+| Question and original source | Observation → decision; alternative |
+| --- | --- |
+| Where does zstd stop? [Decoder `single_frame`, `finish`, `window_log_max`](https://docs.rs/zstd/0.13.3/zstd/stream/read/struct.Decoder.html) and installed `zstd-0.13.3/src/stream/read/mod.rs:66` | Default decoding concatenates frames; `finish` returns the buffered reader without proving completion. Require ordinary zstd magic, one frame, window log 26, decoded EOF after tar footer, and then buffered/input EOF. This rejects skippable frames, concatenation and trailers. Bound compressed and expanded readers independently, counting every consumed byte, with fixed buffers and an EOF probe at the limit. |
+| Can tar iteration enforce this grammar? Installed `tar-0.4.45/src/header.rs:319,716,1490,1514` ([upstream Header](https://docs.rs/tar/0.4.44/tar/struct.Header.html)) | Header accessors parse fields; extended size parsing ignores high bytes beyond u64. Read each 512-byte header directly, check unsigned checksum, USTAR signature, exact raw fixed name, empty prefix/link target and regular type. Before `size()`, require base-256 high bytes `[0x80,0,0,0]`; octal remains supported. General extraction/iteration accepts extensions and hides footer details, so do not use it. |
+| How are duplicate JSON keys detected? [Serde map visitor](https://serde.rs/deserialize-map.html), [serde_json `end` and recursion limit](https://docs.rs/serde_json/latest/serde_json/struct.Deserializer.html#method.end) | A Value map silently replaces duplicate keys. First deserialize with a recursive visitor that tracks decoded String keys in every map and traverses arrays; retain the default recursion limit and require `end()`. Then deserialize the existing Manifest with unknown top-level fields denied. This avoids a bespoke JSON lexer or new dependency. |
+| Which checks are shared? [`pack_staged` and `volumes` at 9b6290d3](../../../src/boxlite/src/checkpoint_package/mod.rs), [`pair::open`, `verify_disk`, `validate_resources`](../../../src/boxlite/src/litebox/checkpoint/pair.rs) | Extract the existing staged-artifact-to-manifest validation for both directions. On unpack, regenerate expected files, compatibility, resources and volume attributes from private artifacts and supplied mappings, then compare every field; provenance is informational. Do not reuse runtime import, which resolves saved host paths. |
+
+Allow any permutation of exactly four members. Before copying each declared body,
+check per-artifact and remaining expanded limits; use checked padding arithmetic.
+Require zero member padding and exactly two zero footer blocks, followed by
+decoded EOF and compressed EOF. All output uses fixed private names and
+`create_new`, mode 0600. Any error drops attempt-owned staging; no caller path is
+published. The manifest cap is 16 MiB. Verification is a point-in-time integrity
+check; callers must keep returned files unchanged and retain the owner while
+using borrowed paths. It does not authorize volumes or establish VM compatibility.
+
+Validation through production pack/unpack covers byte-for-byte round trips with
+read-only volumes/subpaths and unavailable saved source roots; manifest/payload
+corruption including recomputed outer digests; member grammar, duplicate JSON,
+unsupported formats/versions, frame/tar truncation and trailers; exact and exceeded
+limits, numeric overflow and excessive windows; I/O failures and staging cleanup.
+New decoding tests exercise a new API, rather than claim a preexisting decoder
+bug. Run the five 2a scoped make checks above; localhost REST failures require a
+rerun with listening allowed. No VM or cross-Runner acceptance follows. Estimated
+production additions: 300–400 lines; measure against `9b6290d3` before committing.
+
 | Claim/risk | Planned check and required result |
 | --- | --- |
 | Integrity/bounds | Round-trip production artifacts; corrupt/omit/duplicate/traverse/overflow, exhaust disk, interrupt transfers: no published destination or Ready resource. |
