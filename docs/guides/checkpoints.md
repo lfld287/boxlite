@@ -235,6 +235,18 @@ independent `boxlite serve` servers advertising `checkpoints_enabled: true`.
 A missing capability on an older server returns `Unsupported`; no local fallback runs.
 Other language SDKs are unchanged.
 
+### Planned cloud resources
+
+Cloud checkpoint storage, upload/download, an organization catalog and
+cross-region creation of a new Paused Box are planned in the
+[cloud checkpoint design](../contributing/investigations/2026-11-02-cloud-memory-checkpoints.md).
+The existing two-file export and direct REST transfer do not include the read-only
+boot disk or create a durable cloud resource. A future cloud package will carry
+the exact boot disk; volumes will still refer to their original resources and
+current contents. Cross-region restore will require a compatible Runner and
+explicit resume, with callers coordinating external writers and data consistency.
+These cloud operations are not available in this release candidate.
+
 ## REST transfers and caller-local paths
 
 The Rust signatures above are identical for `BoxliteRuntime::rest(...)`.
