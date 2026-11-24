@@ -282,6 +282,7 @@ impl<H: HostVm> Vm<H> {
 impl<H: boxlite_hypervisor::X86Vm> Vm<H> {
     fn run_vcpus(&mut self) -> Result<VmExit> {
         use std::{
+            io::ErrorKind,
             panic::{self, AssertUnwindSafe},
             thread,
         };
@@ -290,6 +291,7 @@ impl<H: boxlite_hypervisor::X86Vm> Vm<H> {
 
         use crate::{
             events::{Event, RECHECK},
+            lifecycle::VmStatus,
             vcpu::{StartGate, Workers},
         };
 
@@ -356,20 +358,43 @@ impl<H: boxlite_hypervisor::X86Vm> Vm<H> {
                     break;
                 }
             }
+            let mut pending_kicks = 0u64;
             loop {
                 match events.wait(Some(RECHECK)) {
                     Ok(Some(event)) => break Ok(event),
                     Err(error) => break Err(error),
                     Ok(None) => {}
                 }
-                if self.lifecycle.drive(self.vcpu_count)
-                    && let Err(error) = kicks
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .iter()
-                        .try_for_each(|kick| kick.kick())
-                {
-                    vcpus.sender.send(Event::VcpuFailed(error.into()));
+                let kick_all = self.lifecycle.drive(self.vcpu_count);
+                if !kick_all && pending_kicks == 0 {
+                    continue;
+                }
+                if self.lifecycle.status() != VmStatus::Pausing || vcpus.sender.is_stopping() {
+                    pending_kicks = 0;
+                    continue;
+                }
+                let kicks = kicks.lock().unwrap_or_else(PoisonError::into_inner);
+                // Startup only appends handles, so their indices stay stable.
+                for (index, kick) in kicks.iter().enumerate() {
+                    let bit = 1u64 << index;
+                    if !kick_all && pending_kicks & bit == 0 {
+                        continue;
+                    }
+                    match kick.kick() {
+                        Ok(()) => pending_kicks &= !bit,
+                        Err(boxlite_hypervisor::Error::KickVcpu { source, .. })
+                            if matches!(
+                                source.kind(),
+                                ErrorKind::WouldBlock | ErrorKind::Interrupted
+                            ) =>
+                        {
+                            pending_kicks |= bit;
+                        }
+                        Err(error) => {
+                            vcpus.sender.send(Event::VcpuFailed(error.into()));
+                            break;
+                        }
+                    }
                 }
             }
         });
